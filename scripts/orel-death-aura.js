@@ -251,6 +251,23 @@ async function gmConsumeUse(payload) {
       return false;
     }
 
+    log("gmConsumeUse: resolved wizardActor", {
+      wizardActor,
+      docName: wizardActor?.documentName,
+      name: wizardActor?.name,
+      uuid: wizardActor?.uuid,
+      hasItems: !!wizardActor?.items
+    });
+    
+    log("gmConsumeUse: tokenDoc", {
+      tokenDoc,
+      docName: tokenDoc?.documentName,
+      uuid: tokenDoc?.uuid,
+      hasActor: !!tokenDoc?.actor,
+      actorDocName: tokenDoc?.actor?.documentName,
+      actorHasItems: !!tokenDoc?.actor?.items
+    });
+
     const feature = wizardActor.items.get(featureItemId);
     if (!feature) {
       warn("gmConsumeUse: feature item not found on resolved actor", {

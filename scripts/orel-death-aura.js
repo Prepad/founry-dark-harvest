@@ -219,13 +219,13 @@ async function gmApplyHeal(payload) {
 }
 
 // Payload:
-// { wizardActorUuid: string, featureItemId: string }
+// { wizardTokenUuid: string, featureItemId: string }
 async function gmConsumeUse(payload) {
   try {
     log("gmConsumeUse: received", payload);
     if (!game.user.isGM) return false;
 
-    const { wizardTokenUuid, wizardActorUuid, featureItemId } = payload ?? {};
+    const { wizardTokenUuid, featureItemId } = payload ?? {};
     if (!featureItemId) {
       warn("gmConsumeUse: invalid payload", payload);
       return false;
@@ -238,17 +238,6 @@ async function gmConsumeUse(payload) {
       const tokenDoc = await fromUuid(wizardTokenUuid);
       wizardActor = tokenDoc?.actor ?? null;
       if (!wizardActor) warn("gmConsumeUse: token actor not found", { wizardTokenUuid });
-    }
-
-    // 2) Fallback to world actor
-    if (!wizardActor && wizardActorUuid) {
-      wizardActor = await fromUuid(wizardActorUuid);
-      if (!wizardActor) warn("gmConsumeUse: wizard actor not found", { wizardActorUuid });
-    }
-
-    if (!wizardActor) {
-      warn("gmConsumeUse: no wizard actor resolved", payload);
-      return false;
     }
 
     const feature = wizardActor.items.get(featureItemId);
@@ -427,7 +416,6 @@ async function orelShowWizardDialog(payload) {
       if (usageFeature) {
         const ok = await OREL_SOCKET.executeAsGM(SOCKET_FN_CONSUME_USE, {
           wizardTokenUuid: wizardToken.document.uuid,
-          wizardActorUuid: wizardActor.uuid,
           featureItemId: usageFeature.id
         });
         if (!ok) return ui.notifications.warn("Использования пассивки закончились.");
@@ -453,7 +441,6 @@ async function orelShowWizardDialog(payload) {
       if (usageFeature) {
         const ok = await OREL_SOCKET.executeAsGM(SOCKET_FN_CONSUME_USE, {
           wizardTokenUuid: wizardToken.document.uuid,
-          wizardActorUuid: wizardActor.uuid,
           featureItemId: usageFeature.id
         });
         if (!ok) return ui.notifications.warn("Использования пассивки закончились.");

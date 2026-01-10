@@ -320,7 +320,11 @@ async function orelShowWizardDialog(payload) {
       if (!lvl) return;
 
       if (usageFeature) {
-        const ok = await consumeOneUse(usageFeature);
+        if (!OREL_SOCKET) return ui.notifications.error("Orel: socket не готов для списания использований.");
+        const ok = await OREL_SOCKET.executeAsGM(SOCKET_FN_CONSUME_USE, {
+          wizardActorUuid: wizardActor.uuid,
+          featureItemId: usageFeature.id
+        });
         if (!ok) return ui.notifications.warn("Использования пассивки закончились.");
       }
       await restoreSlot(wizardActor, lvl);
@@ -338,7 +342,11 @@ async function orelShowWizardDialog(payload) {
       if (d > radiusFt) return ui.notifications.warn(`Цель уже вне радиуса ${radiusFt} ft.`);
 
       if (usageFeature) {
-        const ok = await consumeOneUse(usageFeature);
+        if (!OREL_SOCKET) return ui.notifications.error("Orel: socket не готов для списания использований.");
+        const ok = await OREL_SOCKET.executeAsGM(SOCKET_FN_CONSUME_USE, {
+          wizardActorUuid: wizardActor.uuid,
+          featureItemId: usageFeature.id
+        });
         if (!ok) return ui.notifications.warn("Использования пассивки закончились.");
       }
 
@@ -484,8 +492,9 @@ Hooks.once("ready", async () => {
     return;
   }
 
-  const socket = socketlib.registerSystem(game.system.id);
-  socket.register(SOCKET_FN, orelShowWizardDialog);
+  OREL_SOCKET = socketlib.registerSystem(game.system.id);
+  OREL_SOCKET.register(SOCKET_FN, orelShowWizardDialog);
+  OREL_SOCKET.register(SOCKET_FN_APPLY_HEAL, gmApplyHeal);
 
   if (!game.user.isGM) return;
 
@@ -527,7 +536,7 @@ Hooks.once("ready", async () => {
 
       const payload = { wizardActorId: wizardActor.id, deadName: deadActor.name, dist };
       for (const oid of ownerIds) {
-        await socket.executeAsUser(SOCKET_FN, oid, payload);
+        await OREL_SOCKET.executeAsUser(SOCKET_FN, oid, payload);
       }
     } catch (e) {
       warn("preUpdateActor error", e);

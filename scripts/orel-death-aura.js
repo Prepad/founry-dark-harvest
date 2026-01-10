@@ -225,21 +225,39 @@ async function gmConsumeUse(payload) {
     log("gmConsumeUse: received", payload);
     if (!game.user.isGM) return false;
 
-    const { wizardActorUuid, featureItemId } = payload ?? {};
-    if (!wizardActorUuid || !featureItemId) {
+    const { wizardTokenUuid, wizardActorUuid, featureItemId } = payload ?? {};
+    if (!featureItemId) {
       warn("gmConsumeUse: invalid payload", payload);
       return false;
     }
 
-    const wizardActor = await fromUuid(wizardActorUuid);
+    // 1) Prefer token actor (works for linked + unlinked)
+    let wizardActor = null;
+
+    if (wizardTokenUuid) {
+      const tokenDoc = await fromUuid(wizardTokenUuid);
+      wizardActor = tokenDoc?.actor ?? null;
+      if (!wizardActor) warn("gmConsumeUse: token actor not found", { wizardTokenUuid });
+    }
+
+    // 2) Fallback to world actor
+    if (!wizardActor && wizardActorUuid) {
+      wizardActor = await fromUuid(wizardActorUuid);
+      if (!wizardActor) warn("gmConsumeUse: wizard actor not found", { wizardActorUuid });
+    }
+
     if (!wizardActor) {
-      warn("gmConsumeUse: wizard actor not found", payload);
+      warn("gmConsumeUse: no wizard actor resolved", payload);
       return false;
     }
 
     const feature = wizardActor.items.get(featureItemId);
     if (!feature) {
-      warn("gmConsumeUse: feature item not found on actor", payload);
+      warn("gmConsumeUse: feature item not found on resolved actor", {
+        actor: wizardActor.name,
+        actorUuid: wizardActor.uuid,
+        featureItemId
+      });
       return false;
     }
 
@@ -252,7 +270,7 @@ async function gmConsumeUse(payload) {
     if (value <= 0) return false;
 
     await feature.update({ "system.uses.value": value - 1 });
-    log("gmConsumeUse: decremented", { feature: feature.name, from: value, to: value - 1, max });
+    log("gmConsumeUse: decremented", { actor: wizardActor.name, feature: feature.name, from: value, to: value - 1, max });
     return true;
   } catch (e) {
     warn("gmConsumeUse error", e);
@@ -406,7 +424,7 @@ async function orelShowWizardDialog(payload) {
       // Consume use as GM (only when applying)
       if (usageFeature) {
         const ok = await OREL_SOCKET.executeAsGM(SOCKET_FN_CONSUME_USE, {
-          wizardActorUuid: wizardActor.uuid,
+          wizardActorUuid: wizardToken.document.uuid,
           featureItemId: usageFeature.id
         });
         if (!ok) return ui.notifications.warn("Использования пассивки закончились.");
@@ -431,7 +449,7 @@ async function orelShowWizardDialog(payload) {
       // Consume use as GM (only when applying)
       if (usageFeature) {
         const ok = await OREL_SOCKET.executeAsGM(SOCKET_FN_CONSUME_USE, {
-          wizardActorUuid: wizardActor.uuid,
+          wizardActorUuid: wizardToken.document.uuid,
           featureItemId: usageFeature.id
         });
         if (!ok) return ui.notifications.warn("Использования пассивки закончились.");

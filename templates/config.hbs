@@ -1,0 +1,65 @@
+<form class="flexcol" autocomplete="off">
+  <p style="opacity:.85; margin:0 0 8px 0;">
+    Настройка волшебника, радиуса по уровням и расходуемой особенности.
+    <br/><span style="opacity:.7">Логи в консоли начинаются с <b>Orel:</b></span>
+  </p>
+
+  <div class="form-group">
+    <label>Wizard (Actor)</label>
+    <div class="form-fields">
+      <select name="wizardActor">
+        {{#each actors}}
+          <option value="{{this.id}}" {{#if (eq this.id ../wizardRef)}}selected{{/if}}>{{this.name}}</option>
+        {{/each}}
+      </select>
+    </div>
+    <p class="notes">Выбирай Character-актёра волшебника. Диалог всплывает у OWNER этого актёра (не у GM).</p>
+  </div>
+
+  <div class="form-group">
+    <label>Расходуемая особенность (Item)</label>
+    <div class="form-fields">
+      <select name="usageItem">
+        <option value="">— без ограничений —</option>
+        {{#each items}}
+          <option value="{{this.id}}" {{#if (eq this.id ../usageRef)}}selected{{/if}}>{{this.name}}</option>
+        {{/each}}
+      </select>
+    </div>
+    <p class="notes">Выбирай Item у волшебника, у которого настроены Uses (max/value). При применении пассивки тратится 1 использование.</p>
+  </div>
+
+  <hr/>
+
+  <div class="form-group">
+    <label>Radius progression (ft), JSON[20]</label>
+    <div class="form-fields">
+      <textarea name="radiusProgression" rows="3" style="font-family:monospace;">{{radiusProg}}</textarea>
+    </div>
+  </div>
+
+  <div class="form-group">
+    <label>Heal multiplier progression, JSON[20]</label>
+    <div class="form-fields">
+      <textarea name="healMultiplierProgression" rows="3" style="font-family:monospace;">{{healMult}}</textarea>
+    </div>
+  </div>
+
+  <div class="form-group">
+    <label>Max heal spell level progression, JSON[20]</label>
+    <div class="form-fields">
+      <textarea name="maxHealSpellLevelProgression" rows="3" style="font-family:monospace;">{{maxHeal}}</textarea>
+    </div>
+  </div>
+
+  <div class="form-group">
+    <label>Max restore slot level progression, JSON[20]</label>
+    <div class="form-fields">
+      <textarea name="maxRestoreSlotLevelProgression" rows="3" style="font-family:monospace;">{{maxRestore}}</textarea>
+    </div>
+  </div>
+
+  <footer class="sheet-footer flexrow">
+    <button type="submit"><i class="fas fa-save"></i> Save</button>
+  </footer>
+</form>

@@ -399,7 +399,7 @@ class OrelDeathAuraConfig extends FormApplication {
     return foundry.utils.mergeObject(super.defaultOptions, {
       id: "orel-death-aura-config",
       title: "Orel Death Aura — Config",
-      template: null,
+      template: "modules/orel-death-aura/templates/config.hbs",
       width: 620,
       height: "auto",
       closeOnSubmit: true,
@@ -441,99 +441,6 @@ class OrelDeathAuraConfig extends FormApplication {
     };
   }
 
-  async _render(...args) {
-    // Inline template (no separate HTML file)
-    this.options.template = await this._ensureTemplate();
-    return super._render(...args);
-  }
-
-  async _ensureTemplate() {
-    const tplId = "orel-death-aura-config-template";
-    if (document.getElementById(tplId)) return `#${tplId}`;
-
-    const tpl = document.createElement("template");
-    tpl.id = tplId;
-    tpl.innerHTML = `
-<form class="flexcol" autocomplete="off">
-  <p style="opacity:.85; margin:0 0 8px 0;">
-    Настройка волшебника, радиуса по уровням и расходуемой особенности.
-    <br/><span style="opacity:.7">Логи в консоли начинаются с <b>Orel:</b></span>
-  </p>
-
-  <div class="form-group">
-    <label>Wizard (Actor)</label>
-    <div class="form-fields">
-      <select name="wizardActor">
-        {{#each actors}}
-          <option value="{{this.id}}" {{#if (eq this.id ../wizardRef)}}selected{{/if}}>{{this.name}}</option>
-        {{/each}}
-      </select>
-    </div>
-    <p class="notes">Выбирай Character-актёра волшебника. Диалог всплывает у OWNER этого актёра (не у GM).</p>
-  </div>
-
-  <div class="form-group">
-    <label>Расходуемая особенность (Item)</label>
-    <div class="form-fields">
-      <select name="usageItem">
-        <option value="">— без ограничений —</option>
-        {{#each items}}
-          <option value="{{this.id}}" {{#if (eq this.id ../usageRef)}}selected{{/if}}>{{this.name}}</option>
-        {{/each}}
-      </select>
-    </div>
-    <p class="notes">Выбирай Item у волшебника, у которого настроены Uses (max/value). При применении пассивки тратится 1 использование.</p>
-  </div>
-
-  <hr/>
-
-  <div class="form-group">
-    <label>Radius progression (ft), JSON[20]</label>
-    <div class="form-fields">
-      <textarea name="radiusProgression" rows="3" style="font-family:monospace;">{{radiusProg}}</textarea>
-    </div>
-    <p class="notes">На уровне L радиус = arr[L-1]. Пример: [30,30,30,...]</p>
-  </div>
-
-  <div class="form-group">
-    <label>Heal multiplier progression, JSON[20]</label>
-    <div class="form-fields">
-      <textarea name="healMultiplierProgression" rows="3" style="font-family:monospace;">{{healMult}}</textarea>
-    </div>
-    <p class="notes">Лечение = уровень ячейки × множитель (зависит от уровня персонажа).</p>
-  </div>
-
-  <div class="form-group">
-    <label>Max heal spell level progression, JSON[20]</label>
-    <div class="form-fields">
-      <textarea name="maxHealSpellLevelProgression" rows="3" style="font-family:monospace;">{{maxHeal}}</textarea>
-    </div>
-    <p class="notes">Ограничивает уровни в диалоге исцеления.</p>
-  </div>
-
-  <div class="form-group">
-    <label>Max restore slot level progression, JSON[20]</label>
-    <div class="form-fields">
-      <textarea name="maxRestoreSlotLevelProgression" rows="3" style="font-family:monospace;">{{maxRestore}}</textarea>
-    </div>
-    <p class="notes">Ограничивает уровни в диалоге восстановления ячеек.</p>
-  </div>
-
-  <footer class="sheet-footer flexrow">
-    <button type="submit"><i class="fas fa-save"></i> Save</button>
-  </footer>
-</form>
-`;
-    document.body.appendChild(tpl);
-
-    // Ensure eq helper exists
-    if (!Handlebars.helpers.eq) {
-      Handlebars.registerHelper("eq", (a, b) => a === b);
-    }
-
-    return `#${tplId}`;
-  }
-
   async _updateObject(event, formData) {
     log("Config save", formData);
     await game.settings.set("orel-death-aura", SETTINGS.wizardActor, String(formData.wizardActor ?? ""));
@@ -550,6 +457,10 @@ class OrelDeathAuraConfig extends FormApplication {
 
 Hooks.once("init", () => {
   log("init: registering settings");
+
+  if (!Handlebars.helpers.eq) {
+    Handlebars.registerHelper("eq", (a, b) => a === b);
+  }
 
   // Hidden base settings (managed via UI menu)
   game.settings.register("orel-death-aura", SETTINGS.wizardActor, {

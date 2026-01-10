@@ -270,7 +270,7 @@ async function gmConsumeUse(payload) {
     if (value <= 0) return false;
 
     await wizardActor.updateEmbeddedDocuments("Item", [
-      { _id: feature.id, "system.uses.value": expected }
+      { _id: feature.id, "system.uses.value": value - 1 }
     ]);
     log("gmConsumeUse: decremented", { actor: wizardActor.name, feature: feature.name, from: value, to: value - 1, max });
     return true;

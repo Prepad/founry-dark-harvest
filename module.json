@@ -1,0 +1,39 @@
+{
+  "id": "orel-death-aura",
+  "title": "Orel Death Aura",
+  "description": "Triggers a wizard's passive when any creature drops to 0 HP within radius: choose heal nearby PCs or restore a spell slot. Uses SocketLib to show dialogs on the wizard owner's client.",
+  "version": "1.1.0",
+  "authors": [
+    {
+      "name": "ChatGPT (generated)"
+    }
+  ],
+  "compatibility": {
+    "minimum": "13",
+    "verified": "13"
+  },
+  "relationships": {
+    "requires": [
+      {
+        "id": "socketlib",
+        "type": "module",
+        "compatibility": {}
+      }
+    ],
+    "systems": [
+      {
+        "id": "dnd5e",
+        "type": "system",
+        "compatibility": {}
+      }
+    ]
+  },
+  "esmodules": [
+    "scripts/orel-death-aura.js"
+  ],
+  "styles": [],
+  "languages": [],
+  "url": "",
+  "manifest": "",
+  "download": ""
+}

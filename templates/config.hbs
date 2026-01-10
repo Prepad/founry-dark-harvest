@@ -1,6 +1,6 @@
 <form class="flexcol" autocomplete="off">
   <p style="opacity:.85; margin:0 0 8px 0;">
-    Настройка волшебника, радиуса по уровням и расходуемой особенности.
+    Настройка волшебника, радиуса по уровням, прогрессии лечения кубами и расходуемой пассивной особенности.
     <br/><span style="opacity:.7">Логи в консоли начинаются с <b>Orel:</b></span>
   </p>
 
@@ -17,19 +17,31 @@
   </div>
 
   <div class="form-group">
-    <label>Расходуемая особенность (Item)</label>
+    <label>Расходуемая пассивная особенность (Feature)</label>
     <div class="form-fields">
-      <select name="usageItem">
+      <select name="usageFeature">
         <option value="">— без ограничений —</option>
-        {{#each items}}
+        {{#each features}}
           <option value="{{this.id}}" {{#if (eq this.id ../usageRef)}}selected{{/if}}>{{this.name}}</option>
         {{/each}}
       </select>
     </div>
-    <p class="notes">Выбирай Item у волшебника, у которого настроены Uses (max/value). При применении пассивки тратится 1 использование.</p>
+    <p class="notes">Выбирай пассивную особенность у волшебника (обычно Item типа <b>feat</b>) с Uses. При применении пассивки тратится 1 использование.</p>
   </div>
 
   <hr/>
+
+  <div class="form-group">
+    <label>Radius progression preset</label>
+    <div class="form-fields">
+      <select name="radiusPreset">
+        <option value="">— (не менять) —</option>
+        {{#each radiusPresets}}
+          <option value="{{this.key}}">{{this.label}}</option>
+        {{/each}}
+      </select>
+    </div>
+  </div>
 
   <div class="form-group">
     <label>Radius progression (ft), JSON[20]</label>
@@ -39,16 +51,34 @@
   </div>
 
   <div class="form-group">
-    <label>Heal multiplier progression, JSON[20]</label>
+    <label>Heal dice progression preset</label>
     <div class="form-fields">
-      <textarea name="healMultiplierProgression" rows="3" style="font-family:monospace;">{{healMult}}</textarea>
+      <select name="healDicePreset">
+        <option value="">— (не менять) —</option>
+        {{#each healDicePresets}}
+          <option value="{{this.key}}">{{this.label}}</option>
+        {{/each}}
+      </select>
     </div>
   </div>
 
   <div class="form-group">
-    <label>Max heal spell level progression, JSON[20]</label>
+    <label>Heal dice progression, JSON[20]</label>
     <div class="form-fields">
-      <textarea name="maxHealSpellLevelProgression" rows="3" style="font-family:monospace;">{{maxHeal}}</textarea>
+      <textarea name="healDiceProgression" rows="3" style="font-family:monospace;">{{healDiceProg}}</textarea>
+    </div>
+    <p class="notes">На уровне L формула кубов = arr[L-1], например "2d6+3". При исцелении: сначала выбирается цель, затем бросаются кубы.</p>
+  </div>
+
+  <div class="form-group">
+    <label>Max restore slot level preset</label>
+    <div class="form-fields">
+      <select name="maxRestorePreset">
+        <option value="">— (не менять) —</option>
+        {{#each maxRestorePresets}}
+          <option value="{{this.key}}">{{this.label}}</option>
+        {{/each}}
+      </select>
     </div>
   </div>
 

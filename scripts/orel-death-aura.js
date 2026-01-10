@@ -17,14 +17,33 @@ function warn(msg, data) {
 
 const SETTINGS = {
   wizardActor: "wizardActor",
-  healMultiplierProgression: "healMultiplierProgression",
-  maxHealSpellLevelProgression: "maxHealSpellLevelProgression",
-  maxRestoreSlotLevelProgression: "maxRestoreSlotLevelProgression",
   radiusProgression: "radiusProgression",
-  usageItem: "usageItem", // Item UUID/ID within actor, or name (fallback)
+  healDiceProgression: "healDiceProgression",
+  maxRestoreSlotLevelProgression: "maxRestoreSlotLevelProgression",
+  usageFeature: "usageFeature"
 };
 
-function parseProgression(jsonText, { length = 20, fallbackValue = 30, min = null, max = null } = {}) {
+// Presets for UI pickers
+const PRESETS = {
+  radius: [
+    { key: "30-flat", label: "30 ft (all levels)", value: Array.from({ length: 20 }, () => 30) },
+    { key: "10to30", label: "10→30 ft (every 5 levels +5)", value: [10,10,10,10,10,15,15,15,15,15,20,20,20,20,20,25,25,25,25,25] },
+    { key: "20to60", label: "20→60 ft (every 4 levels +10)", value: [20,20,20,20,30,30,30,30,40,40,40,40,50,50,50,50,60,60,60,60] }
+  ],
+  healDice: [
+    { key: "1d6-flat", label: "1d6 (all levels)", value: Array.from({ length: 20 }, () => "1d6") },
+    { key: "d6-scaling", label: "1d6→4d6 (lvl 1/5/11/17)", value: ["1d6","1d6","1d6","1d6","2d6","2d6","2d6","2d6","2d6","2d6","3d6","3d6","3d6","3d6","3d6","3d6","4d6","4d6","4d6","4d6"] },
+    { key: "d8-scaling", label: "1d8→4d8 (lvl 1/5/11/17)", value: ["1d8","1d8","1d8","1d8","2d8","2d8","2d8","2d8","2d8","2d8","3d8","3d8","3d8","3d8","3d8","3d8","4d8","4d8","4d8","4d8"] },
+    { key: "pb-d6", label: "PB d6 (approx)", value: ["2d6","2d6","2d6","2d6","3d6","3d6","3d6","3d6","4d6","4d6","4d6","4d6","5d6","5d6","5d6","5d6","6d6","6d6","6d6","6d6"] }
+  ],
+  maxRestore: [
+    { key: "cap9", label: "Cap 9", value: Array.from({ length: 20 }, () => 9) },
+    { key: "cap3", label: "Cap 3", value: Array.from({ length: 20 }, () => 3) },
+    { key: "cap5", label: "Cap 5", value: Array.from({ length: 20 }, () => 5) }
+  ]
+};
+
+function parseNumberProgression(jsonText, { length = 20, fallbackValue = 30, min = null, max = null } = {}) {
   try {
     const arr = JSON.parse(jsonText);
     if (!Array.isArray(arr)) throw new Error("Not an array");
@@ -38,7 +57,24 @@ function parseProgression(jsonText, { length = 20, fallbackValue = 30, min = nul
     }
     return out;
   } catch (e) {
-    warn("parseProgression: invalid JSON, using fallback", { jsonText, error: String(e) });
+    warn("parseNumberProgression: invalid JSON, using fallback", { error: String(e) });
+    return Array.from({ length }, () => fallbackValue);
+  }
+}
+
+function parseStringProgression(jsonText, { length = 20, fallbackValue = "1d6" } = {}) {
+  try {
+    const arr = JSON.parse(jsonText);
+    if (!Array.isArray(arr)) throw new Error("Not an array");
+    const out = [];
+    for (let i = 0; i < length; i++) {
+      let v = String(arr[i] ?? fallbackValue);
+      if (!v.trim()) v = fallbackValue;
+      out.push(v);
+    }
+    return out;
+  } catch (e) {
+    warn("parseStringProgression: invalid JSON, using fallback", { error: String(e) });
     return Array.from({ length }, () => fallbackValue);
   }
 }
@@ -52,15 +88,12 @@ async function resolveActorIdOrUuid(idOrUuid) {
       if (doc?.documentName === "Actor") return doc;
       if (doc?.actor) return doc.actor;
     }
-  } catch (e) {
-    // ignore
-  }
+  } catch (e) {}
   return game.actors.get(v) ?? null;
 }
 
 async function getWizardActor() {
-  const idOrUuid = game.settings.get("orel-death-aura", SETTINGS.wizardActor)?.trim();
-  return await resolveActorIdOrUuid(idOrUuid);
+  return await resolveActorIdOrUuid(game.settings.get("orel-death-aura", SETTINGS.wizardActor));
 }
 
 function getActiveTokenForActor(actor) {
@@ -107,28 +140,21 @@ function buildSpellLevelOptions(actor, { capLevel = 9 } = {}) {
   return options.join("");
 }
 
-async function findUsageItem(wizardActor) {
-  const ref = (game.settings.get("orel-death-aura", SETTINGS.usageItem) ?? "").trim();
+// ---- Passive feature with uses (e.g. Wild Shape) ----
+async function findUsageFeature(wizardActor) {
+  const ref = (game.settings.get("orel-death-aura", SETTINGS.usageFeature) ?? "").trim();
   if (!ref) return null;
 
-  // Try UUID first
   try {
     if (ref.includes(".")) {
       const doc = await fromUuid(ref);
-      if (doc?.documentName === "Item" && doc.parent?.id === wizardActor.id) return doc;
-      if (doc?.documentName === "Item" && doc.actor?.id === wizardActor.id) return doc;
+      if (doc?.documentName === "Item" && (doc.parent?.id === wizardActor.id || doc.actor?.id === wizardActor.id)) return doc;
     }
-  } catch (e) {
-    // ignore
-  }
+  } catch (e) {}
 
-  // Try item ID on actor
-  const byId = wizardActor.items.get(ref);
-  if (byId) return byId;
-
-  // Fallback: by name
-  const byName = wizardActor.items.find(i => (i.name ?? "").toLowerCase() === ref.toLowerCase());
-  return byName ?? null;
+  return wizardActor.items.get(ref)
+    ?? wizardActor.items.find(i => (i.name ?? "").toLowerCase() === ref.toLowerCase())
+    ?? null;
 }
 
 function getItemUses(item) {
@@ -139,15 +165,14 @@ function getItemUses(item) {
 }
 
 async function consumeOneUse(item) {
-  const { value, max, hasUses } = getItemUses(item);
-  if (!hasUses) return true; // unlimited / not configured
+  const { value, hasUses } = getItemUses(item);
+  if (!hasUses) return true;
   if (value <= 0) return false;
   await item.update({ "system.uses.value": value - 1 });
   return true;
 }
 
 async function restoreSlot(actor, level) {
-  log("restoreSlot: attempt", { actor: actor.name, level });
   const path = `system.spells.spell${level}.value`;
   const maxPath = `system.spells.spell${level}.max`;
   const cur = foundry.utils.getProperty(actor, path) ?? 0;
@@ -158,23 +183,18 @@ async function restoreSlot(actor, level) {
 
   await actor.update({ [path]: cur + 1 });
   ui.notifications.info(`${actor.name} восстановил(а) 1 ячейку ${level} уровня (${cur + 1}/${max}).`);
-  log("restoreSlot: done", { newValue: cur + 1, max });
 }
 
 async function healActor(targetActor, amount) {
-  log("healActor: attempt", { target: targetActor.name, amount });
   const hp = targetActor.system.attributes.hp;
   const newValue = Math.min((hp.value ?? 0) + amount, hp.max ?? (hp.value ?? 0));
   await targetActor.update({ "system.attributes.hp.value": newValue });
   ui.notifications.info(`${targetActor.name} исцелён(а) на ${amount} HP (${newValue}/${hp.max}).`);
-  log("healActor: done", { newValue, max: hp.max });
 }
 
-// ------------------ Dialogs (run on wizard owner client) ------------------
+// ------------------ Dialogs ------------------
 
 async function dialogMainChoice(deadName, radiusFt, usesInfo) {
-  log("Dialog #1: main choice", { deadName, radiusFt, usesInfo });
-
   const usesLine = usesInfo?.hasUses
     ? `<p style="opacity:.8; margin-top:4px;">Использования: ${usesInfo.value}/${usesInfo.max}</p>`
     : "";
@@ -198,10 +218,45 @@ async function dialogMainChoice(deadName, radiusFt, usesInfo) {
   });
 }
 
-async function dialogRestoreLevel(wizardActor, { capLevel }) {
-  log("Dialog: restore level", { capLevel });
-  const slotOptions = buildSpellLevelOptions(wizardActor, { capLevel });
+async function dialogPickHealTarget(wizardToken, wizardActor, { radiusFt }) {
+  const candidates = canvas.tokens.placeables
+    .filter(t => t?.actor)
+    .filter(t => (actorHasNonGmOwner(t.actor) || t.actor.id === wizardActor.id))
+    .filter(t => distFt(wizardToken, t) <= radiusFt);
 
+  if (!candidates.length) {
+    ui.notifications.warn("Нет токенов игроков в радиусе для исцеления.");
+    return null;
+  }
+
+  const optionsTargets = candidates
+    .map(t => `<option value="${t.id}">${t.name} — ${t.actor?.name}</option>`)
+    .join("");
+
+  const content = `
+    <p>Выбери цель в пределах ${radiusFt} ft.</p>
+    <div style="margin-top:8px;">
+      <label>Цель:</label>
+      <select id="targetTokenId">${optionsTargets}</select>
+    </div>
+  `;
+
+  return await new Promise(resolve => {
+    new Dialog({
+      title: "Исцеление — цель",
+      content,
+      buttons: {
+        ok: { icon: '<i class="fas fa-check"></i>', label: "Бросить кубы", callback: html => resolve(String(html.find("#targetTokenId").val())) },
+        cancel: { icon: '<i class="fas fa-times"></i>', label: "Отмена", callback: () => resolve(null) }
+      },
+      default: "ok",
+      close: () => resolve(null)
+    }).render(true);
+  });
+}
+
+async function dialogRestoreLevel(wizardActor, { capLevel }) {
+  const slotOptions = buildSpellLevelOptions(wizardActor, { capLevel });
   const content = `
     <p>Выбери уровень ячейки, которую нужно восстановить (+1).</p>
     <div style="margin-top:8px;">
@@ -224,183 +279,94 @@ async function dialogRestoreLevel(wizardActor, { capLevel }) {
   });
 }
 
-async function dialogHealTargetAndLevel(wizardToken, wizardActor, { radiusFt, capSpellLevel, multiplier }) {
-  const candidates = canvas.tokens.placeables
-    .filter(t => t?.actor)
-    .filter(t => (actorHasNonGmOwner(t.actor) || t.actor.id === wizardActor.id))
-    .filter(t => distFt(wizardToken, t) <= radiusFt);
-
-  log("Dialog #2: heal candidates", {
-    count: candidates.length,
-    names: candidates.map(t => t.name),
-    capSpellLevel,
-    multiplier
-  });
-
-  if (!candidates.length) {
-    ui.notifications.warn("Нет токенов игроков в радиусе для исцеления.");
-    return null;
-  }
-
-  const optionsTargets = candidates
-    .map(t => `<option value="${t.id}">${t.name} — ${t.actor?.name}</option>`)
-    .join("");
-
-  const slotOptions = buildSpellLevelOptions(wizardActor, { capLevel: capSpellLevel });
-
-  const content = `
-    <p>Выбери цель в пределах ${radiusFt} ft и уровень:</p>
-    <p style="opacity:.8; margin-top:4px;">Лечение = уровень × ${multiplier}</p>
-    <div style="display:flex; flex-direction:column; gap:10px; margin-top:8px;">
-      <div>
-        <label>Цель:</label>
-        <select id="targetTokenId">${optionsTargets}</select>
-      </div>
-      <div>
-        <label>Уровень:</label>
-        <select id="spellLevel">${slotOptions}</select>
-      </div>
-    </div>
-  `;
-
-  return await new Promise(resolve => {
-    new Dialog({
-      title: "Исцеление",
-      content,
-      buttons: {
-        ok: {
-          icon: '<i class="fas fa-check"></i>',
-          label: "Исцелить",
-          callback: html => resolve({
-            tokenId: String(html.find("#targetTokenId").val()),
-            level: Number(html.find("#spellLevel").val())
-          })
-        },
-        cancel: { icon: '<i class="fas fa-times"></i>', label: "Отмена", callback: () => resolve(null) }
-      },
-      default: "ok",
-      close: () => resolve(null)
-    }).render(true);
-  });
-}
-
-// ------------------ Socket handler (runs on wizard owner client) ------------------
+// ------------------ Socket handler ------------------
 
 async function orelShowWizardDialog(payload) {
   try {
-    log("socket: received", payload);
-
     const wizardActor = await getWizardActor();
-    if (!wizardActor) return warn("socket: wizard actor not configured / not found");
-    if (wizardActor.id !== payload.wizardActorId) return;
+    if (!wizardActor || wizardActor.id !== payload.wizardActorId) return;
 
-    // Show ONLY on owner client (GM excluded)
     const isOwner = wizardActor.testUserPermission(game.user, CONST.DOCUMENT_OWNERSHIP_LEVELS.OWNER);
-    if (!isOwner || game.user.isGM) {
-      log("socket: not eligible on this client", { user: game.user.id, isGM: game.user.isGM, isOwner });
-      return;
-    }
-
-    // Progressions
-    const level = getActorLevel(wizardActor);
-
-    const healMultArr = parseProgression(game.settings.get("orel-death-aura", SETTINGS.healMultiplierProgression), { fallbackValue: 3, min: 0 });
-    const maxHealArr = parseProgression(game.settings.get("orel-death-aura", SETTINGS.maxHealSpellLevelProgression), { fallbackValue: 9, min: 1, max: 9 });
-    const maxRestoreArr = parseProgression(game.settings.get("orel-death-aura", SETTINGS.maxRestoreSlotLevelProgression), { fallbackValue: 9, min: 1, max: 9 });
-    const radiusArr = parseProgression(game.settings.get("orel-death-aura", SETTINGS.radiusProgression), { fallbackValue: 30, min: 0 });
-
-    const multiplier = healMultArr[level - 1] ?? 3;
-    const capHeal = maxHealArr[level - 1] ?? 9;
-    const capRestore = maxRestoreArr[level - 1] ?? 9;
-    const radiusFt = radiusArr[level - 1] ?? 30;
+    if (!isOwner || game.user.isGM) return;
 
     const wizardToken = getActiveTokenForActor(wizardActor);
-    if (!wizardToken) return warn("socket: wizard token not found on scene");
+    if (!wizardToken) return;
 
-    // Usage limitation
-    const usageItem = await findUsageItem(wizardActor);
-    const usesInfo = usageItem ? getItemUses(usageItem) : null;
+    const level = getActorLevel(wizardActor);
 
+    const radiusArr = parseNumberProgression(game.settings.get("orel-death-aura", SETTINGS.radiusProgression), { fallbackValue: 30, min: 0 });
+    const healDiceArr = parseStringProgression(game.settings.get("orel-death-aura", SETTINGS.healDiceProgression), { fallbackValue: "1d6" });
+    const maxRestoreArr = parseNumberProgression(game.settings.get("orel-death-aura", SETTINGS.maxRestoreSlotLevelProgression), { fallbackValue: 9, min: 1, max: 9 });
+
+    const radiusFt = radiusArr[level - 1] ?? 30;
+    const healFormula = healDiceArr[level - 1] ?? "1d6";
+    const capRestore = maxRestoreArr[level - 1] ?? 9;
+
+    const maxSlot = getMaxSpellLevelWithSlots(wizardActor);
+    const capRestoreFinal = Math.min(capRestore, maxSlot || 9);
+
+    const usageFeature = await findUsageFeature(wizardActor);
+    const usesInfo = usageFeature ? getItemUses(usageFeature) : null;
     if (usesInfo?.hasUses && usesInfo.value <= 0) {
       ui.notifications.warn("Использования пассивки закончились.");
-      log("socket: no uses left", { item: usageItem?.name, usesInfo });
       return;
     }
 
-    // Cap levels to available slots + progression caps
-    const maxSlot = getMaxSpellLevelWithSlots(wizardActor);
-    const capHealFinal = Math.min(capHeal, maxSlot || 9);
-    const capRestoreFinal = Math.min(capRestore, maxSlot || 9);
-
     const choice = await dialogMainChoice(payload.deadName ?? "существо", radiusFt, usesInfo);
-    log("socket: choice", { choice });
     if (!choice) return;
 
-    // Consume use only if an effect is actually applied
     if (choice === "restore") {
       const lvl = await dialogRestoreLevel(wizardActor, { capLevel: capRestoreFinal });
-      log("socket: restore level selected", { lvl });
       if (!lvl) return;
 
-      if (usageItem) {
-        const ok = await consumeOneUse(usageItem);
-        if (!ok) {
-          ui.notifications.warn("Использования пассивки закончились.");
-          log("socket: failed to consume use", { item: usageItem.name });
-          return;
-        }
+      if (usageFeature) {
+        const ok = await consumeOneUse(usageFeature);
+        if (!ok) return ui.notifications.warn("Использования пассивки закончились.");
       }
-
       await restoreSlot(wizardActor, lvl);
       return;
     }
 
     if (choice === "heal") {
-      const pick = await dialogHealTargetAndLevel(wizardToken, wizardActor, {
-        radiusFt,
-        capSpellLevel: capHealFinal,
-        multiplier
-      });
-      log("socket: heal pick", pick);
-      if (!pick) return;
+      const targetTokenId = await dialogPickHealTarget(wizardToken, wizardActor, { radiusFt });
+      if (!targetTokenId) return;
 
-      const targetToken = canvas.tokens.get(pick.tokenId);
-      if (!targetToken?.actor) return warn("socket: target token/actor not found", pick);
+      const targetToken = canvas.tokens.get(targetTokenId);
+      if (!targetToken?.actor) return;
 
-      // Re-check range
       const d = distFt(wizardToken, targetToken);
-      if (d > radiusFt) {
-        ui.notifications.warn(`Цель уже вне радиуса ${radiusFt} ft.`);
-        log("socket: target out of range at apply time", { d, radiusFt });
-        return;
+      if (d > radiusFt) return ui.notifications.warn(`Цель уже вне радиуса ${radiusFt} ft.`);
+
+      if (usageFeature) {
+        const ok = await consumeOneUse(usageFeature);
+        if (!ok) return ui.notifications.warn("Использования пассивки закончились.");
       }
 
-      if (usageItem) {
-        const ok = await consumeOneUse(usageItem);
-        if (!ok) {
-          ui.notifications.warn("Использования пассивки закончились.");
-          log("socket: failed to consume use", { item: usageItem.name });
-          return;
-        }
-      }
+      log("heal roll", { healFormula, level, target: targetToken.name });
+      const roll = await (new Roll(healFormula)).evaluate({ async: true });
+      await roll.toMessage({
+        speaker: ChatMessage.getSpeaker({ token: wizardToken }),
+        flavor: `Orel Death Aura — исцеление (${healFormula}) для ${targetToken.name}`
+      });
 
-      await healActor(targetToken.actor, pick.level * multiplier);
+      const amount = Number(roll.total ?? 0);
+      await healActor(targetToken.actor, amount);
       return;
     }
   } catch (e) {
-    warn("socket: handler error", e);
+    warn("socket handler error", e);
   }
 }
 
-// ------------------ Settings UI (picker) ------------------
+// ------------------ Settings UI ------------------
 
 class OrelDeathAuraConfig extends FormApplication {
   static get defaultOptions() {
     return foundry.utils.mergeObject(super.defaultOptions, {
       id: "orel-death-aura-config",
-      title: "Orel Death Aura — Config",
+      title: "Orel Death Aura — Configure",
       template: "modules/orel-death-aura/templates/config.hbs",
-      width: 620,
+      width: 680,
       height: "auto",
       closeOnSubmit: true,
       submitOnChange: false,
@@ -408,24 +374,30 @@ class OrelDeathAuraConfig extends FormApplication {
     });
   }
 
-  getData() {
+  async getData() {
     const wizardRef = game.settings.get("orel-death-aura", SETTINGS.wizardActor) ?? "";
-    const usageRef = game.settings.get("orel-death-aura", SETTINGS.usageItem) ?? "";
+    const usageRef = game.settings.get("orel-death-aura", SETTINGS.usageFeature) ?? "";
 
     const actors = game.actors.contents
       .filter(a => a.type === "character")
       .map(a => ({ id: a.id, name: a.name }))
       .sort((a, b) => a.name.localeCompare(b.name));
 
-    let wizardActor = game.actors.get(wizardRef) ?? null;
+    const wizardActor = game.actors.get(wizardRef) ?? null;
 
-    const items = wizardActor
+    const features = wizardActor
       ? wizardActor.items
           .filter(i => {
             const max = Number(foundry.utils.getProperty(i, "system.uses.max") ?? 0);
-            return max > 0; // расходуемые
+            if (max <= 0) return false;
+            const t = (i.type ?? "").toLowerCase();
+            // class features in dnd5e are often type "feat"
+            return ["feat"].includes(t);
           })
-          .map(i => ({ id: i.id, name: i.name }))
+          .map(i => ({
+            id: i.id,
+            name: `${i.name} (${foundry.utils.getProperty(i, "system.uses.value") ?? 0}/${foundry.utils.getProperty(i, "system.uses.max") ?? 0})`
+          }))
           .sort((a, b) => a.name.localeCompare(b.name))
       : [];
 
@@ -433,95 +405,73 @@ class OrelDeathAuraConfig extends FormApplication {
       wizardRef,
       usageRef,
       actors,
-      items,
-      healMult: game.settings.get("orel-death-aura", SETTINGS.healMultiplierProgression),
-      maxHeal: game.settings.get("orel-death-aura", SETTINGS.maxHealSpellLevelProgression),
-      maxRestore: game.settings.get("orel-death-aura", SETTINGS.maxRestoreSlotLevelProgression),
+      features,
       radiusProg: game.settings.get("orel-death-aura", SETTINGS.radiusProgression),
+      healDiceProg: game.settings.get("orel-death-aura", SETTINGS.healDiceProgression),
+      maxRestore: game.settings.get("orel-death-aura", SETTINGS.maxRestoreSlotLevelProgression),
+      radiusPresets: PRESETS.radius.map(p => ({ key: p.key, label: p.label })),
+      healDicePresets: PRESETS.healDice.map(p => ({ key: p.key, label: p.label })),
+      maxRestorePresets: PRESETS.maxRestore.map(p => ({ key: p.key, label: p.label }))
     };
   }
 
+  activateListeners(html) {
+    super.activateListeners(html);
+
+    html.find('select[name="radiusPreset"]').on("change", ev => {
+      const key = ev.currentTarget.value;
+      if (!key) return;
+      const preset = PRESETS.radius.find(p => p.key === key);
+      if (preset) html.find('textarea[name="radiusProgression"]').val(JSON.stringify(preset.value));
+      ev.currentTarget.value = "";
+    });
+
+    html.find('select[name="healDicePreset"]').on("change", ev => {
+      const key = ev.currentTarget.value;
+      if (!key) return;
+      const preset = PRESETS.healDice.find(p => p.key === key);
+      if (preset) html.find('textarea[name="healDiceProgression"]').val(JSON.stringify(preset.value));
+      ev.currentTarget.value = "";
+    });
+
+    html.find('select[name="maxRestorePreset"]').on("change", ev => {
+      const key = ev.currentTarget.value;
+      if (!key) return;
+      const preset = PRESETS.maxRestore.find(p => p.key === key);
+      if (preset) html.find('textarea[name="maxRestoreSlotLevelProgression"]').val(JSON.stringify(preset.value));
+      ev.currentTarget.value = "";
+    });
+
+    html.find('select[name="wizardActor"]').on("change", () => {
+      ui.notifications.info("Сохрани настройки и открой конфиг заново, чтобы обновить список особенностей.");
+    });
+  }
+
   async _updateObject(event, formData) {
-    log("Config save", formData);
     await game.settings.set("orel-death-aura", SETTINGS.wizardActor, String(formData.wizardActor ?? ""));
-    await game.settings.set("orel-death-aura", SETTINGS.usageItem, String(formData.usageItem ?? ""));
+    await game.settings.set("orel-death-aura", SETTINGS.usageFeature, String(formData.usageFeature ?? ""));
     await game.settings.set("orel-death-aura", SETTINGS.radiusProgression, String(formData.radiusProgression ?? ""));
-    await game.settings.set("orel-death-aura", SETTINGS.healMultiplierProgression, String(formData.healMultiplierProgression ?? ""));
-    await game.settings.set("orel-death-aura", SETTINGS.maxHealSpellLevelProgression, String(formData.maxHealSpellLevelProgression ?? ""));
+    await game.settings.set("orel-death-aura", SETTINGS.healDiceProgression, String(formData.healDiceProgression ?? ""));
     await game.settings.set("orel-death-aura", SETTINGS.maxRestoreSlotLevelProgression, String(formData.maxRestoreSlotLevelProgression ?? ""));
     ui.notifications.info("Orel: настройки сохранены.");
   }
 }
 
-// ------------------ Initialization ------------------
+// ------------------ Init & Ready ------------------
 
 Hooks.once("init", () => {
-  log("init: registering settings");
+  if (!Handlebars.helpers.eq) Handlebars.registerHelper("eq", (a, b) => a === b);
 
-  if (!Handlebars.helpers.eq) {
-    Handlebars.registerHelper("eq", (a, b) => a === b);
-  }
+  game.settings.register("orel-death-aura", SETTINGS.wizardActor, { name: "Wizard Actor", scope: "world", config: false, type: String, default: "" });
+  game.settings.register("orel-death-aura", SETTINGS.usageFeature, { name: "Usage Feature", scope: "world", config: false, type: String, default: "" });
+  game.settings.register("orel-death-aura", SETTINGS.radiusProgression, { name: "Radius progression", scope: "world", config: false, type: String, default: JSON.stringify(Array.from({ length: 20 }, () => 30)) });
+  game.settings.register("orel-death-aura", SETTINGS.healDiceProgression, { name: "Heal dice progression", scope: "world", config: false, type: String, default: JSON.stringify(Array.from({ length: 20 }, () => "1d6")) });
+  game.settings.register("orel-death-aura", SETTINGS.maxRestoreSlotLevelProgression, { name: "Max restore slot progression", scope: "world", config: false, type: String, default: JSON.stringify(Array.from({ length: 20 }, () => 9)) });
 
-  // Hidden base settings (managed via UI menu)
-  game.settings.register("orel-death-aura", SETTINGS.wizardActor, {
-    name: "Wizard Actor UUID/ID",
-    hint: "Используй меню настройки модуля.",
-    scope: "world",
-    config: false,
-    type: String,
-    default: ""
-  });
-
-  game.settings.register("orel-death-aura", SETTINGS.usageItem, {
-    name: "Usage Item (UUID/ID/Name)",
-    hint: "Используй меню настройки модуля.",
-    scope: "world",
-    config: false,
-    type: String,
-    default: ""
-  });
-
-  game.settings.register("orel-death-aura", SETTINGS.radiusProgression, {
-    name: "Radius progression (JSON)",
-    hint: "Используй меню настройки модуля.",
-    scope: "world",
-    config: false,
-    type: String,
-    default: JSON.stringify(Array.from({ length: 20 }, () => 30))
-  });
-
-  game.settings.register("orel-death-aura", SETTINGS.healMultiplierProgression, {
-    name: "Heal multiplier progression (JSON)",
-    hint: "Используй меню настройки модуля.",
-    scope: "world",
-    config: false,
-    type: String,
-    default: JSON.stringify(Array.from({ length: 20 }, () => 3))
-  });
-
-  game.settings.register("orel-death-aura", SETTINGS.maxHealSpellLevelProgression, {
-    name: "Max heal spell level progression (JSON)",
-    hint: "Используй меню настройки модуля.",
-    scope: "world",
-    config: false,
-    type: String,
-    default: JSON.stringify(Array.from({ length: 20 }, () => 9))
-  });
-
-  game.settings.register("orel-death-aura", SETTINGS.maxRestoreSlotLevelProgression, {
-    name: "Max restore slot level progression (JSON)",
-    hint: "Используй меню настройки модуля.",
-    scope: "world",
-    config: false,
-    type: String,
-    default: JSON.stringify(Array.from({ length: 20 }, () => 9))
-  });
-
-  // Settings menu with pickers
   game.settings.registerMenu("orel-death-aura", "configMenu", {
     name: "Orel Death Aura — Configure",
     label: "Open Config",
-    hint: "Выбор волшебника, радиуса по уровням, прогрессий и расходуемой особенности.",
+    hint: "Выбор волшебника, радиуса, кубов лечения и расходуемой пассивной особенности.",
     icon: "fas fa-hat-wizard",
     type: OrelDeathAuraConfig,
     restricted: true
@@ -529,27 +479,17 @@ Hooks.once("init", () => {
 });
 
 Hooks.once("ready", async () => {
-  log("ready: starting");
-
   if (!game.modules.get("socketlib")?.active || !globalThis.socketlib) {
     ui.notifications.error("Orel: нужен модуль SocketLib (включи его) для работы Orel Death Aura.");
-    warn("SocketLib inactive - module disabled");
     return;
   }
 
-  // Register socket handler on EVERY client (module loads for all)
   const socket = socketlib.registerSystem(game.system.id);
   socket.register(SOCKET_FN, orelShowWizardDialog);
-  log("SocketLib registered", { system: game.system.id, SOCKET_FN });
 
-  // GM-only death detector to avoid duplicate sends
-  if (!game.user.isGM) {
-    log("ready: non-GM client - death detector disabled (GM-only)");
-    return;
-  }
+  if (!game.user.isGM) return;
 
-  // Dedup death events
-  const lastDeath = new Map(); // actorId -> ts
+  const lastDeath = new Map();
   const DEATH_DEDUP_MS = 1200;
 
   function shouldProcessDeath(deadActorId) {
@@ -559,14 +499,12 @@ Hooks.once("ready", async () => {
     return (now - prev) > DEATH_DEDUP_MS;
   }
 
-  Hooks.on("preUpdateActor", async (deadActor, changes, options, userId) => {
+  Hooks.on("preUpdateActor", async (deadActor, changes) => {
     try {
       const newHp = foundry.utils.getProperty(changes, "system.attributes.hp.value");
       if (newHp === undefined || newHp === null) return;
 
       const oldHp = deadActor.system.attributes.hp.value ?? 0;
-      log("preUpdateActor: HP update", { dead: deadActor.name, oldHp, newHp, userId });
-
       if (!(oldHp > 0 && Number(newHp) <= 0)) return;
       if (!shouldProcessDeath(deadActor.id)) return;
 
@@ -577,35 +515,24 @@ Hooks.once("ready", async () => {
       const deadToken = getActiveTokenForActor(deadActor);
       if (!wizardToken || !deadToken) return;
 
-      // Use radius progression by wizard level
       const level = getActorLevel(wizardActor);
-      const radiusArr = parseProgression(game.settings.get("orel-death-aura", SETTINGS.radiusProgression), { fallbackValue: 30, min: 0 });
+      const radiusArr = parseNumberProgression(game.settings.get("orel-death-aura", SETTINGS.radiusProgression), { fallbackValue: 30, min: 0 });
       const radiusFt = radiusArr[level - 1] ?? 30;
 
       const dist = distFt(wizardToken, deadToken);
-      const inRange = dist <= radiusFt;
-      log("death range check", { dead: deadActor.name, dist, radiusFt, inRange });
-
-      if (!inRange) return;
+      if (dist > radiusFt) return;
 
       const ownerIds = getWizardOwnerUserIds(wizardActor);
       if (!ownerIds.length) return;
 
-      const payload = {
-        wizardActorId: wizardActor.id,
-        deadName: deadActor.name,
-        dist
-      };
-
+      const payload = { wizardActorId: wizardActor.id, deadName: deadActor.name, dist };
       for (const oid of ownerIds) {
-        log("socket send to owner", { oid, payload });
         await socket.executeAsUser(SOCKET_FN, oid, payload);
       }
     } catch (e) {
-      warn("preUpdateActor: handler error", e);
+      warn("preUpdateActor error", e);
     }
   });
 
-  ui.notifications.info("Orel: Orel Death Aura активен (GM detector).");
-  log("GM detector enabled");
+  ui.notifications.info("Orel: Orel Death Aura активен.");
 });

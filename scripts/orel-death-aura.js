@@ -492,7 +492,7 @@ Hooks.once("ready", async () => {
     return;
   }
 
-  OREL_SOCKET = socketlib.registerSystem(game.system.id);
+  const OREL_SOCKET = socketlib.registerSystem(game.system.id);
   OREL_SOCKET.register(SOCKET_FN, orelShowWizardDialog);
   OREL_SOCKET.register(SOCKET_FN_APPLY_HEAL, gmApplyHeal);
 

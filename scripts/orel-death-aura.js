@@ -254,12 +254,13 @@ async function gmConsumeUse(payload) {
     const value = Number(uses?.value ?? 0);
     const max = Number(uses?.max ?? 0);
     const hasUses = max > 0;
+    uses.value = uses.value - 1;
 
     if (!hasUses) return true;
     if (value <= 0) return false;
 
     await wizardActor.updateEmbeddedDocuments("Item", [
-      { _id: feature.id, "system.uses.value": value - 1 }
+      { _id: feature.id, "system.uses": uses }
     ]);
     log("gmConsumeUse: decremented", { actor: wizardActor.name, feature: feature.name, from: value, to: value - 1, max });
     return true;

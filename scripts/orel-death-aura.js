@@ -5,6 +5,10 @@
 
 const OREL_PREFIX = "Orel: ";
 const SOCKET_FN = "orelDeathAura_showWizardDialog_v1";
+const SOCKET_FN_APPLY_HEAL = "orelDeathAura_applyHeal_v1";
+const SOCKET_FN_CONSUME_USE = "orelDeathAura_consumeUse_v1";
+
+let OREL_SOCKET = null;
 
 function log(msg, data) {
   if (data !== undefined) console.log(OREL_PREFIX + msg, data);
@@ -492,7 +496,7 @@ Hooks.once("ready", async () => {
     return;
   }
 
-  const OREL_SOCKET = socketlib.registerSystem(game.system.id);
+  OREL_SOCKET = socketlib.registerSystem(game.system.id);
   OREL_SOCKET.register(SOCKET_FN, orelShowWizardDialog);
   OREL_SOCKET.register(SOCKET_FN_APPLY_HEAL, gmApplyHeal);
 

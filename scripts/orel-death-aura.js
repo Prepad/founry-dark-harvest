@@ -218,51 +218,208 @@ async function gmApplyHeal(payload) {
   }
 }
 
-// Payload:
-// { wizardTokenUuid: string, featureItemId: string }
+/**
+ * GM-side consumption of a feature use (bypass permissions) — Foundry v13 safe version.
+ *
+ * Expected payload (recommended):
+ * {
+ *   wizardTokenUuid: string,   // TokenDocument UUID (preferred; supports linked + unlinked)
+ *   featureItemId: string,     // Embedded Item _id on the SAME actor we're modifying
+ *   wizardActorUuid?: string   // Optional fallback (world Actor UUID)
+ * }
+ *
+ * What this function does:
+ * - Resolves the correct Actor to update (token actor first, then world actor fallback).
+ * - Finds the feature Item by id (and as fallback by name if you pass featureName).
+ * - Updates uses via actor.updateEmbeddedDocuments("Item", ...) (canonical for embedded docs).
+ * - Verifies immediately + after a short delay to detect "rollback" by other modules/effects.
+ * - Logs everything with "Orel:" prefix.
+ */
 async function gmConsumeUse(payload) {
   try {
     log("gmConsumeUse: received", payload);
     if (!game.user.isGM) return false;
 
-    const { wizardTokenUuid, featureItemId } = payload ?? {};
-    if (!featureItemId) {
-      warn("gmConsumeUse: invalid payload", payload);
+    const {
+      wizardTokenUuid,
+      wizardActorUuid,
+      featureItemId,
+      featureName // optional: fallback if id doesn't exist on token actor
+    } = payload ?? {};
+
+    if (!featureItemId && !featureName) {
+      warn("gmConsumeUse: invalid payload (no featureItemId/featureName)", payload);
       return false;
     }
 
-    // 1) Prefer token actor (works for linked + unlinked)
-    let wizardActor = null;
+    // -----------------------
+    // Resolve actor to modify
+    // -----------------------
+    let actor = null;
 
+    // 1) Preferred: token actor (works for linked + unlinked)
     if (wizardTokenUuid) {
-      const tokenDoc = await fromUuid(wizardTokenUuid);
-      wizardActor = tokenDoc?.actor ?? null;
-      if (!wizardActor) warn("gmConsumeUse: token actor not found", { wizardTokenUuid });
+      const doc = await fromUuid(wizardTokenUuid);
+
+      // In v13, TokenDocument has documentName "Token"
+      if (doc?.documentName === "Token") {
+        actor = doc.actor ?? null;
+        log("gmConsumeUse: token resolved", {
+          wizardTokenUuid,
+          tokenDocName: doc.documentName,
+          tokenScene: doc.parent?.name,
+          actorName: actor?.name,
+          actorUuid: actor?.uuid,
+          actorId: actor?.id,
+          actorIsToken: actor?.isToken,
+          actorHasItems: !!actor?.items
+        });
+      } else {
+        // Sometimes fromUuid may return a token-like doc with .actor
+        actor = doc?.actor ?? null;
+        log("gmConsumeUse: token-like resolved", {
+          wizardTokenUuid,
+          docName: doc?.documentName,
+          actorName: actor?.name,
+          actorUuid: actor?.uuid,
+          actorIsToken: actor?.isToken,
+          actorHasItems: !!actor?.items
+        });
+      }
     }
 
-    const feature = wizardActor.items.get(featureItemId);
+    // 2) Fallback: world actor (less reliable for unlinked)
+    if (!actor && wizardActorUuid) {
+      const doc = await fromUuid(wizardActorUuid);
+      if (doc?.documentName === "Actor") actor = doc;
+
+      log("gmConsumeUse: actor fallback resolved", {
+        wizardActorUuid,
+        docName: doc?.documentName,
+        actorName: actor?.name,
+        actorUuid: actor?.uuid,
+        actorId: actor?.id,
+        actorIsToken: actor?.isToken,
+        actorHasItems: !!actor?.items
+      });
+    }
+
+    if (!actor || !actor.items) {
+      warn("gmConsumeUse: could not resolve an Actor with items", { actor, payload });
+      return false;
+    }
+
+    // -----------------------
+    // Resolve feature item
+    // -----------------------
+    let feature = null;
+
+    if (featureItemId) feature = actor.items.get(featureItemId) ?? null;
+
+    // Fallback by name (useful when token actor has different embedded ids)
+    if (!feature && featureName) {
+      const lower = String(featureName).toLowerCase().trim();
+      feature = actor.items.find(i => String(i.name ?? "").toLowerCase().trim() === lower) ?? null;
+    }
+
     if (!feature) {
-      warn("gmConsumeUse: feature item not found on resolved actor", {
-        actor: wizardActor.name,
-        actorUuid: wizardActor.uuid,
-        featureItemId
+      warn("gmConsumeUse: feature not found on resolved actor", {
+        actorName: actor.name,
+        actorUuid: actor.uuid,
+        actorIsToken: actor.isToken,
+        featureItemId,
+        featureName,
+        actorItemIdsSample: actor.items.map(i => i.id).slice(0, 15)
       });
       return false;
     }
 
+    // -----------------------
+    // Read uses and validate
+    // -----------------------
     const uses = foundry.utils.getProperty(feature, "system.uses");
     const value = Number(uses?.value ?? 0);
     const max = Number(uses?.max ?? 0);
-    const hasUses = max > 0;
-    uses.value = uses.value - 1;
+    const hasUses = Number.isFinite(max) && max > 0;
 
-    if (!hasUses) return true;
-    if (value <= 0) return false;
+    log("gmConsumeUse: before", {
+      actor: actor.name,
+      actorUuid: actor.uuid,
+      actorIsToken: actor.isToken,
+      feature: feature.name,
+      featureId: feature.id,
+      featureUuid: feature.uuid,
+      featureParentUuid: feature.parent?.uuid,
+      uses: foundry.utils.deepClone(uses)
+    });
 
-    await wizardActor.updateEmbeddedDocuments("Item", [
-      { _id: feature.id, "system.uses": uses }
-    ]);
-    log("gmConsumeUse: decremented", { actor: wizardActor.name, feature: feature.name, from: value, to: value - 1, max });
+    if (!hasUses) return true;      // feature has no uses configured -> no need to decrement
+    if (value <= 0) return false;   // no remaining uses
+
+    const expected = value - 1;
+
+    // -----------------------
+    // Apply update (canonical)
+    // -----------------------
+    try {
+      await actor.updateEmbeddedDocuments("Item", [
+        { _id: feature.id, "system.uses.value": expected }
+      ]);
+    } catch (e) {
+      warn("gmConsumeUse: updateEmbeddedDocuments threw", e);
+      return false;
+    }
+
+    // -----------------------
+    // Verify immediately
+    // -----------------------
+    const rereadNow = actor.items.get(feature.id) ?? null;
+    const actualNow = Number(foundry.utils.getProperty(rereadNow, "system.uses.value") ?? NaN);
+
+    log("gmConsumeUse: verify immediate", {
+      expected,
+      actualNow,
+      rereadFound: !!rereadNow
+    });
+
+    // If it didn't stick immediately, something is wrong (wrong actor, wrong path, or rollback in same tick)
+    if (!Number.isFinite(actualNow) || actualNow !== expected) {
+      warn("gmConsumeUse: update did not stick immediately", {
+        expected,
+        actualNow,
+        actorUuid: actor.uuid,
+        actorIsToken: actor.isToken
+      });
+      // Still return false to prevent consuming action silently
+      return false;
+    }
+
+    // -----------------------
+    // Verify after delay (detect rollback)
+    // -----------------------
+    setTimeout(() => {
+      try {
+        const rereadLater = actor.items.get(feature.id) ?? null;
+        const actualLater = Number(foundry.utils.getProperty(rereadLater, "system.uses.value") ?? NaN);
+
+        log("gmConsumeUse: verify after 250ms", {
+          expected,
+          actualLater,
+          rolledBack: Number.isFinite(actualLater) && actualLater !== expected
+        });
+      } catch (e) {
+        warn("gmConsumeUse: delayed verify error", e);
+      }
+    }, 250);
+
+    log("gmConsumeUse: decremented OK", {
+      actor: actor.name,
+      feature: feature.name,
+      from: value,
+      to: expected,
+      max
+    });
+
     return true;
   } catch (e) {
     warn("gmConsumeUse error", e);

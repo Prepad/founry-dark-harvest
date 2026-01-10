@@ -1,7 +1,7 @@
 {
   "id": "orel-death-aura",
   "title": "Orel Death Aura",
-  "version": "1.3.6",
+  "version": "1.3.7",
   "compatibility": { "minimum": "13", "verified": "13" },
 
   "esmodules": ["scripts/orel-death-aura.js"],

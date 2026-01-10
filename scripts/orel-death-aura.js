@@ -269,33 +269,10 @@ async function gmConsumeUse(payload) {
     if (!hasUses) return true;
     if (value <= 0) return false;
 
-    const before = Number(foundry.utils.getProperty(feature, "system.uses.value") ?? 0);
-
-    log("gmConsumeUse: before update", { feature: feature.name, before });
-
-    let updated;
-    try {
-      updated = await feature.update({ "system.uses.value": value - 1 });
-    } catch (e) {
-      warn("gmConsumeUse: feature.update threw", e);
-      return false;
-    }
-
-    log("gmConsumeUse: update returned", { updated });
-
-    const after = Number(foundry.utils.getProperty(feature, "system.uses.value") ?? 0);
-    log("gmConsumeUse: after update (same object)", { after });
-
-    // На всякий случай: перечитай item заново из актёра (важно!)
-    const reread = wizardActor.items.get(feature.id);
-    const rereadAfter = Number(foundry.utils.getProperty(reread, "system.uses.value") ?? 0);
-    log("gmConsumeUse: after update (reread from actor)", { rereadAfter });
-
-    if (rereadAfter !== (value - 1)) {
-      warn("gmConsumeUse: update did not stick", { expected: value - 1, rereadAfter });
-    }
-
-
+    await wizardActor.updateEmbeddedDocuments("Item", [
+      { _id: feature.id, "system.uses.value": expected }
+    ]);
+    log("gmConsumeUse: decremented", { actor: wizardActor.name, feature: feature.name, from: value, to: value - 1, max });
     return true;
   } catch (e) {
     warn("gmConsumeUse error", e);

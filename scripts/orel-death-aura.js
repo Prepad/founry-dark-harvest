@@ -441,7 +441,8 @@ async function orelShowWizardDialog(payload) {
       // Consume use as GM (only when applying)
       if (usageFeature) {
         const ok = await OREL_SOCKET.executeAsGM(SOCKET_FN_CONSUME_USE, {
-          wizardActorUuid: wizardToken.document.uuid,
+          wizardTokenUuid: wizardToken.document.uuid,
+          wizardActorUuid: wizardActor.uuid,
           featureItemId: usageFeature.id
         });
         if (!ok) return ui.notifications.warn("Использования пассивки закончились.");
@@ -466,7 +467,8 @@ async function orelShowWizardDialog(payload) {
       // Consume use as GM (only when applying)
       if (usageFeature) {
         const ok = await OREL_SOCKET.executeAsGM(SOCKET_FN_CONSUME_USE, {
-          wizardActorUuid: wizardToken.document.uuid,
+          wizardTokenUuid: wizardToken.document.uuid,
+          wizardActorUuid: wizardActor.uuid,
           featureItemId: usageFeature.id
         });
         if (!ok) return ui.notifications.warn("Использования пассивки закончились.");

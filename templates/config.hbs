@@ -1,4 +1,4 @@
-<form class="flexcol" autocomplete="off">
+<div class="flexcol">
   <p style="opacity:.85; margin:0 0 8px 0;">
     Настройка волшебника, радиуса по уровням, прогрессии лечения кубами и расходуемой пассивной особенности.
     <br/><span style="opacity:.7">Логи в консоли начинаются с <b>Orel:</b></span>
@@ -9,7 +9,7 @@
     <div class="form-fields">
       <select name="wizardActor">
         {{#each actors}}
-          <option value="{{this.id}}" {{#if (eq this.id ../wizardRef)}}selected{{/if}}>{{this.name}}</option>
+          <option value="{{this.id}}" {{#if this.selected}}selected{{/if}}>{{this.name}}</option>
         {{/each}}
       </select>
     </div>
@@ -22,7 +22,7 @@
       <select name="usageFeature">
         <option value="">— без ограничений —</option>
         {{#each features}}
-          <option value="{{this.id}}" {{#if (eq this.id ../usageRef)}}selected{{/if}}>{{this.name}}</option>
+          <option value="{{this.id}}" {{#if this.selected}}selected{{/if}}>{{this.name}}</option>
         {{/each}}
       </select>
     </div>
@@ -92,4 +92,4 @@
   <footer class="sheet-footer flexrow">
     <button type="submit"><i class="fas fa-save"></i> Save</button>
   </footer>
-</form>
+</div>

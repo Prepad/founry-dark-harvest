@@ -1,14 +1,17 @@
 // Orel Death Aura
-// Foundry VTT v13 + dnd5e
+// Foundry VTT v13/v14 + dnd5e
 // Requires SocketLib
 // Logs start with "Orel: "
 
 const OREL_PREFIX = "Orel: ";
+const MODULE_ID = "orel-death-aura";
+const { ApplicationV2, DialogV2, HandlebarsApplicationMixin } = foundry.applications.api;
 const SOCKET_FN = "orelDeathAura_showWizardDialog_v1";
-const SOCKET_FN_APPLY_HEAL = "orelDeathAura_applyHeal_v1";
-const SOCKET_FN_CONSUME_USE = "orelDeathAura_consumeUse_v1";
+const SOCKET_FN_APPLY_HEAL = "orelDeathAura_applyHeal_v2";
+const SOCKET_FN_RESTORE_SLOT = "orelDeathAura_restoreSlot_v1";
 
 let OREL_SOCKET = null;
+const wizardActions = new Map();
 
 function log(msg, data) {
   if (data !== undefined) console.log(OREL_PREFIX + msg, data);
@@ -101,12 +104,13 @@ async function getWizardActor() {
 }
 
 function getActiveTokenForActor(actor) {
-  return actor?.getActiveTokens?.()[0] ?? canvas.tokens.placeables.find(t => t.actor?.id === actor?.id) ?? null;
+  if (!canvas.ready) return null;
+  return actor?.getActiveTokens?.()[0] ?? canvas.tokens?.placeables?.find(t => t.actor?.id === actor?.id) ?? null;
 }
 
 function distFt(t1, t2) {
-  if (!t1 || !t2) return Infinity;
-  return canvas.grid.measureDistance(t1.center, t2.center);
+  if (!t1 || !t2 || !canvas.ready) return Infinity;
+  return canvas.grid.measurePath([t1.center, t2.center]).distance;
 }
 
 function getActorLevel(actor) {
@@ -120,7 +124,7 @@ function actorHasNonGmOwner(actor) {
 
 function getWizardOwnerUserIds(wizardActor) {
   return game.users
-    .filter(u => !u.isGM)
+    .filter(u => u.active && !u.isGM)
     .filter(u => wizardActor.testUserPermission(u, CONST.DOCUMENT_OWNERSHIP_LEVELS.OWNER))
     .map(u => u.id);
 }
@@ -136,9 +140,9 @@ function getMaxSpellLevelWithSlots(actor) {
 function buildSpellLevelOptions(actor, { capLevel = 9 } = {}) {
   const options = [];
   for (let l = 1; l <= 9; l++) {
-    const cur = foundry.utils.getProperty(actor, `system.spells.spell${l}.value`) ?? 0;
-    const max = foundry.utils.getProperty(actor, `system.spells.spell${l}.max`) ?? 0;
-    const disabled = (max <= 0) || (l > capLevel);
+    const cur = Number(foundry.utils.getProperty(actor, `system.spells.spell${l}.value`) ?? 0);
+    const max = Number(foundry.utils.getProperty(actor, `system.spells.spell${l}.max`) ?? 0);
+    const disabled = (max <= 0) || (cur >= max) || (l > capLevel);
     options.push(`<option value="${l}" ${disabled ? "disabled" : ""}>${l} уровень (${cur}/${max})</option>`);
   }
   return options.join("");
@@ -163,117 +167,166 @@ async function findUsageFeature(wizardActor) {
 
 function getItemUses(item) {
   const uses = foundry.utils.getProperty(item, "system.uses");
-  const value = Number(uses?.value ?? 0);
-  const max = Number(uses?.max ?? 0);
-  return { value, max, hasUses: max > 0 };
+  const rawMax = Number(uses?.max ?? 0);
+  const max = Number.isFinite(rawMax) ? Math.max(0, rawMax) : 0;
+  // Prefer the modern spent counter; value is a fallback for older Items.
+  const rawSpent = Number(uses?.spent ?? (max - Number(uses?.value ?? max)));
+  const spent = Number.isFinite(rawSpent) ? Math.max(0, rawSpent) : max;
+  const value = Math.max(0, Math.min(max, max - spent));
+  return { value, max, spent, hasUses: max > 0 };
+}
+
+async function resolveWizardActor(payload) {
+  if (payload?.wizardTokenUuid) {
+    const tokenDoc = await fromUuid(payload.wizardTokenUuid);
+    if (tokenDoc?.actor) return tokenDoc.actor;
+  }
+  if (payload?.wizardActorUuid) {
+    const actor = await fromUuid(payload.wizardActorUuid);
+    if (actor?.documentName === "Actor") return actor;
+  }
+  return null;
+}
+
+async function withWizardAction(payload, action) {
+  const actor = await resolveWizardActor(payload);
+  if (!actor) return { ok: false, message: "Волшебник не найден." };
+
+  // Serialize resource checks, updates and refunds for this actor on the GM.
+  const key = actor.uuid;
+  const previous = wizardActions.get(key) ?? Promise.resolve();
+  const pending = previous.catch(() => {}).then(() => action(actor));
+  wizardActions.set(key, pending);
+  try {
+    return await pending;
+  } finally {
+    if (wizardActions.get(key) === pending) wizardActions.delete(key);
+  }
+}
+
+async function applyWithFeatureUse(actor, featureItemId, apply) {
+  const feature = featureItemId ? actor.items.get(featureItemId) : null;
+  if (featureItemId && !feature) {
+    return { ok: false, message: "Расходуемая особенность не найдена." };
+  }
+
+  const uses = feature ? getItemUses(feature) : null;
+  if (uses?.hasUses && uses.value <= 0) {
+    return { ok: false, message: "Использования пассивки закончились." };
+  }
+
+  let refund = null;
+  if (uses?.hasUses) {
+    const legacy = feature.system.uses.spent == null && feature.system.uses.value != null;
+    const path = legacy ? "system.uses.value" : "system.uses.spent";
+    const previous = legacy ? uses.value : uses.spent;
+    const next = legacy ? previous - 1 : previous + 1;
+    await actor.updateEmbeddedDocuments("Item", [{ _id: feature.id, [path]: next }]);
+    refund = () => actor.updateEmbeddedDocuments("Item", [{ _id: feature.id, [path]: previous }]);
+  }
+
+  try {
+    await apply();
+    return { ok: true };
+  } catch (error) {
+    if (refund) await refund();
+    throw error;
+  }
 }
 
 // ---- Actions ----
-async function restoreSlot(actor, level) {
+async function restoreSlot(actor, level, featureItemId) {
   log("restoreSlot: attempt", { actor: actor.name, level });
+
+  if (!Number.isInteger(level) || level < 1 || level > 9) {
+    return { ok: false, message: "Некорректный уровень ячейки." };
+  }
 
   const path = `system.spells.spell${level}.value`;
   const maxPath = `system.spells.spell${level}.max`;
-  const cur = foundry.utils.getProperty(actor, path) ?? 0;
-  const max = foundry.utils.getProperty(actor, maxPath) ?? 0;
+  const cur = Number(foundry.utils.getProperty(actor, path) ?? 0);
+  const max = Number(foundry.utils.getProperty(actor, maxPath) ?? 0);
 
-  if (max <= 0) return ui.notifications.warn(`У ${actor.name} нет ячеек ${level} уровня.`);
-  if (cur >= max) return ui.notifications.info(`Ячейки ${level} уровня уже полные (${cur}/${max}).`);
+  if (!Number.isFinite(cur) || !Number.isFinite(max) || max <= 0) {
+    return { ok: false, message: `У ${actor.name} нет ячеек ${level} уровня.` };
+  }
+  if (cur >= max) {
+    return { ok: false, message: `Ячейки ${level} уровня уже полные (${cur}/${max}).` };
+  }
 
-  await actor.update({ [path]: cur + 1 });
-  ui.notifications.info(`${actor.name} восстановил(а) 1 ячейку ${level} уровня (${cur + 1}/${max}).`);
+  const result = await applyWithFeatureUse(actor, featureItemId, () => actor.update({ [path]: cur + 1 }));
+  if (!result.ok) return result;
+
   log("restoreSlot: done", { newValue: cur + 1, max });
+  return { ok: true, message: `${actor.name} восстановил(а) 1 ячейку ${level} уровня (${cur + 1}/${max}).` };
 }
 
 // ------------------ GM-side handlers (SocketLib) ------------------
 
 // Payload:
-// { targetActorUuid: string, amount: number }
+// { wizardTokenUuid: string, featureItemId?: string, targetActorUuid: string, amount: number }
 async function gmApplyHeal(payload) {
   try {
     log("gmApplyHeal: received", payload);
-    if (!game.user.isGM) return false;
+    if (!game.user.isGM) return { ok: false };
 
     const { targetActorUuid, amount } = payload ?? {};
     if (!targetActorUuid || !Number.isFinite(amount) || amount <= 0) {
       warn("gmApplyHeal: invalid payload", payload);
-      return false;
+      return { ok: false, message: "Некорректная величина исцеления." };
     }
 
-    const targetActor = await fromUuid(targetActorUuid);
-    if (!targetActor) {
-      warn("gmApplyHeal: target actor not found", payload);
-      return false;
-    }
+    return await withWizardAction(payload, async wizardActor => {
+      const targetActor = await fromUuid(targetActorUuid);
+      const hp = targetActor?.system?.attributes?.hp;
+      if (!hp) return { ok: false, message: "Цель исцеления не найдена." };
 
-    const hp = targetActor.system.attributes.hp;
-    const newValue = Math.min((hp.value ?? 0) + amount, hp.max ?? (hp.value ?? 0));
-    await targetActor.update({ "system.attributes.hp.value": newValue });
+      const current = Number(hp.value ?? 0);
+      const max = Number(hp.effectiveMax ?? hp.max ?? current);
+      if (!Number.isFinite(current) || !Number.isFinite(max)) {
+        return { ok: false, message: "Некорректные HP цели." };
+      }
+      const newValue = Math.min(current + amount, max);
+      if (newValue <= current) return { ok: false, message: "У цели уже полные HP." };
 
-    log("gmApplyHeal: applied", { target: targetActor.name, amount, newValue, max: hp.max });
-    return true;
+      const result = await applyWithFeatureUse(wizardActor, payload.featureItemId,
+        () => targetActor.update({ "system.attributes.hp.value": newValue }));
+      if (result.ok) log("gmApplyHeal: applied", { target: targetActor.name, amount, newValue, max });
+      return result;
+    });
   } catch (e) {
     warn("gmApplyHeal error", e);
-    return false;
+    return { ok: false, message: "Не удалось применить исцеление." };
   }
 }
 
 // Payload:
-// {
-//   wizardTokenUuid?: string,   // preferred (works for linked + unlinked)
-//   wizardActorUuid?: string,   // fallback
-//   featureItemId: string       // embedded Item id on the resolved actor
-// }
-async function gmConsumeUse(payload) {
+// { wizardTokenUuid: string, featureItemId?: string, level: number }
+async function gmRestoreSlot(payload) {
   try {
-    if (!game.user.isGM) return false;
-
-    const { wizardTokenUuid, wizardActorUuid, featureItemId } = payload ?? {};
-    if (!featureItemId) return false;
-
-    // Resolve actor (token actor preferred)
-    let actor = null;
-
-    if (wizardTokenUuid) {
-      const tokenDoc = await fromUuid(wizardTokenUuid);
-      actor = tokenDoc?.actor ?? null;
-    }
-
-    if (!actor && wizardActorUuid) {
-      const doc = await fromUuid(wizardActorUuid);
-      actor = doc?.documentName === "Actor" ? doc : null;
-    }
-
-    if (!actor?.items) return false;
-
-    const feature = actor.items.get(featureItemId);
-    if (!feature) return false;
-
-    const uses = feature.system?.uses;
-    const max = Number(uses?.max ?? 0);
-    const spent = Number(uses?.spent ?? 0);
-
-    // If feature has no uses configured, treat as unlimited
-    if (!(max > 0)) return true;
-
-    // No uses left
-    if (spent >= max) return false;
-
-    const nextSpent = spent + 1;
-
-    await actor.updateEmbeddedDocuments("Item", [
-      { _id: feature.id, "system.uses.spent": nextSpent }
-    ]);
-
-    return true;
+    if (!game.user.isGM) return { ok: false };
+    return await withWizardAction(payload, actor => restoreSlot(actor, payload.level, payload.featureItemId));
   } catch (e) {
-    console.warn("Orel: gmConsumeUse error", e);
-    return false;
+    warn("gmRestoreSlot error", e);
+    return { ok: false, message: "Не удалось восстановить ячейку." };
   }
 }
 
 
 // ------------------ Dialogs ------------------
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, char => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  })[char]);
+}
+
+function dialogContent(html) {
+  // A DOM div preserves form controls under v14's DialogV2 HTML cleaning.
+  const content = document.createElement("div");
+  content.innerHTML = html;
+  return content;
+}
 
 async function dialogMainChoice(deadName, radiusFt, usesInfo) {
   log("dialogMainChoice", { deadName, radiusFt, usesInfo });
@@ -283,21 +336,18 @@ async function dialogMainChoice(deadName, radiusFt, usesInfo) {
     : "";
 
   const content = `
-    <p><b>Пассивка:</b> существо (${deadName}) умерло в пределах ${radiusFt} ft.</p>
+    <p><b>Пассивка:</b> существо (${escapeHtml(deadName)}) упало до 0 HP в пределах ${radiusFt} ft.</p>
     ${usesLine}
   `;
-  return await new Promise(resolve => {
-    new Dialog({
-      title: "Пассивка волшебника",
-      content,
-      buttons: {
-        heal: { icon: '<i class="fas fa-heart"></i>', label: "Исцелить", callback: () => resolve("heal") },
-        restore: { icon: '<i class="fas fa-magic"></i>', label: "Восстановить ячейку", callback: () => resolve("restore") },
-        cancel: { icon: '<i class="fas fa-times"></i>', label: "Отмена", callback: () => resolve(null) }
-      },
-      default: "heal",
-      close: () => resolve(null)
-    }).render(true);
+  return DialogV2.wait({
+    window: { title: "Пассивка волшебника" },
+    content: dialogContent(content),
+    buttons: [
+      { action: "heal", icon: "fas fa-heart", label: "Исцелить", default: true },
+      { action: "restore", icon: "fas fa-magic", label: "Восстановить ячейку" },
+      { action: "cancel", icon: "fas fa-times", label: "Отмена", callback: () => null }
+    ],
+    rejectClose: false
   });
 }
 
@@ -315,54 +365,59 @@ async function dialogPickHealTarget(wizardToken, wizardActor, { radiusFt }) {
   }
 
   const optionsTargets = candidates
-    .map(t => `<option value="${t.id}">${t.name} — ${t.actor?.name}</option>`)
+    .map(t => `<option value="${escapeHtml(t.id)}">${escapeHtml(t.name)} — ${escapeHtml(t.actor?.name)}</option>`)
     .join("");
 
   const content = `
     <p>Выбери цель в пределах ${radiusFt} ft.</p>
     <div style="margin-top:8px;">
       <label>Цель:</label>
-      <select id="targetTokenId">${optionsTargets}</select>
+      <select name="targetTokenId">${optionsTargets}</select>
     </div>
   `;
 
-  return await new Promise(resolve => {
-    new Dialog({
-      title: "Исцеление — цель",
-      content,
-      buttons: {
-        ok: { icon: '<i class="fas fa-check"></i>', label: "Бросить кубы", callback: html => resolve(String(html.find("#targetTokenId").val())) },
-        cancel: { icon: '<i class="fas fa-times"></i>', label: "Отмена", callback: () => resolve(null) }
-      },
-      default: "ok",
-      close: () => resolve(null)
-    }).render(true);
+  return DialogV2.wait({
+    window: { title: "Исцеление — цель" },
+    content: dialogContent(content),
+    buttons: [
+      { action: "ok", icon: "fas fa-check", label: "Бросить кубы", default: true,
+        callback: (event, button) => button.form.elements.targetTokenId.value },
+      { action: "cancel", icon: "fas fa-times", label: "Отмена", callback: () => null }
+    ],
+    rejectClose: false
   });
 }
 
 async function dialogRestoreLevel(wizardActor, { capLevel }) {
   log("dialogRestoreLevel", { capLevel });
 
+  const hasMissingSlot = Array.from({ length: 9 }, (_, i) => i + 1).some(level => {
+    const slot = foundry.utils.getProperty(wizardActor, `system.spells.spell${level}`);
+    return level <= capLevel && Number(slot?.max ?? 0) > Number(slot?.value ?? 0);
+  });
+  if (!hasMissingSlot) {
+    ui.notifications.info("Нет ячеек, которые можно восстановить.");
+    return null;
+  }
+
   const slotOptions = buildSpellLevelOptions(wizardActor, { capLevel });
   const content = `
     <p>Выбери уровень ячейки, которую нужно восстановить (+1).</p>
     <div style="margin-top:8px;">
       <label>Уровень:</label>
-      <select id="spellLevel">${slotOptions}</select>
+      <select name="spellLevel">${slotOptions}</select>
     </div>
   `;
 
-  return await new Promise(resolve => {
-    new Dialog({
-      title: "Восстановление ячейки",
-      content,
-      buttons: {
-        ok: { icon: '<i class="fas fa-check"></i>', label: "Восстановить", callback: html => resolve(Number(html.find("#spellLevel").val())) },
-        cancel: { icon: '<i class="fas fa-times"></i>', label: "Отмена", callback: () => resolve(null) }
-      },
-      default: "ok",
-      close: () => resolve(null)
-    }).render(true);
+  return DialogV2.wait({
+    window: { title: "Восстановление ячейки" },
+    content: dialogContent(content),
+    buttons: [
+      { action: "ok", icon: "fas fa-check", label: "Восстановить", default: true,
+        callback: (event, button) => Number(button.form.elements.spellLevel.value) },
+      { action: "cancel", icon: "fas fa-times", label: "Отмена", callback: () => null }
+    ],
+    rejectClose: false
   });
 }
 
@@ -372,7 +427,7 @@ async function orelShowWizardDialog(payload) {
   try {
     log("socket: orelShowWizardDialog received", payload);
 
-    const wizardActor = await getWizardActor();
+    let wizardActor = await getWizardActor();
     if (!wizardActor || wizardActor.id !== payload.wizardActorId) return;
 
     // Show ONLY on owner client (GM excluded)
@@ -381,6 +436,7 @@ async function orelShowWizardDialog(payload) {
 
     const wizardToken = getActiveTokenForActor(wizardActor);
     if (!wizardToken) return;
+    wizardActor = wizardToken.actor ?? wizardActor;
 
     const level = getActorLevel(wizardActor);
 
@@ -416,16 +472,13 @@ async function orelShowWizardDialog(payload) {
       const lvl = await dialogRestoreLevel(wizardActor, { capLevel: capRestoreFinal });
       if (!lvl) return;
 
-      // Consume use as GM (only when applying)
-      if (usageFeature) {
-        const ok = await OREL_SOCKET.executeAsGM(SOCKET_FN_CONSUME_USE, {
-          wizardTokenUuid: wizardToken.document.uuid,
-          featureItemId: usageFeature.id
-        });
-        if (!ok) return ui.notifications.warn("Использования пассивки закончились.");
-      }
-
-      await restoreSlot(wizardActor, lvl);
+      const result = await OREL_SOCKET.executeAsGM(SOCKET_FN_RESTORE_SLOT, {
+        wizardTokenUuid: wizardToken.document.uuid,
+        featureItemId: usageFeature?.id,
+        level: lvl
+      });
+      if (!result?.ok) ui.notifications.warn(result?.message ?? "Не удалось восстановить ячейку.");
+      else ui.notifications.info(result.message);
       return;
     }
 
@@ -441,21 +494,12 @@ async function orelShowWizardDialog(payload) {
       const d = distFt(wizardToken, targetToken);
       if (d > radiusFt) return ui.notifications.warn(`Цель уже вне радиуса ${radiusFt} ft.`);
 
-      // Consume use as GM (only when applying)
-      if (usageFeature) {
-        const ok = await OREL_SOCKET.executeAsGM(SOCKET_FN_CONSUME_USE, {
-          wizardTokenUuid: wizardToken.document.uuid,
-          featureItemId: usageFeature.id
-        });
-        if (!ok) return ui.notifications.warn("Использования пассивки закончились.");
-      }
-
-      // Step 2: roll dice (client) + apply heal (GM)
+      // Validate the roll before the GM consumes a use and applies healing.
       log("heal: rolling dice", { healFormula, level, target: targetToken.name });
 
-      const roll = await (new Roll(healFormula)).evaluate({ async: true });
+      const roll = await (new foundry.dice.Roll(healFormula)).evaluate();
       await roll.toMessage({
-        speaker: ChatMessage.getSpeaker({ token: wizardToken }),
+        speaker: ChatMessage.getSpeaker({ actor: wizardActor, token: wizardToken.document }),
         flavor: `Orel Death Aura — исцеление (${healFormula}) для ${targetToken.name}`
       });
 
@@ -465,41 +509,45 @@ async function orelShowWizardDialog(payload) {
         return;
       }
 
-      await OREL_SOCKET.executeAsGM(SOCKET_FN_APPLY_HEAL, {
+      const result = await OREL_SOCKET.executeAsGM(SOCKET_FN_APPLY_HEAL, {
+        wizardTokenUuid: wizardToken.document.uuid,
+        featureItemId: usageFeature?.id,
         targetActorUuid: targetToken.actor.uuid,
         amount
       });
+      if (!result?.ok) ui.notifications.warn(result?.message ?? "Не удалось применить исцеление.");
 
       return;
     }
   } catch (e) {
     warn("socket handler error", e);
+    ui.notifications.error("Не удалось применить пассивку. Проверь настройки и повтори попытку.");
   }
 }
 
 // ------------------ Settings UI ------------------
 
-class OrelDeathAuraConfig extends FormApplication {
-  static get defaultOptions() {
-    return foundry.utils.mergeObject(super.defaultOptions, {
-      id: "orel-death-aura-config",
-      title: "Orel Death Aura — Configure",
-      template: "modules/orel-death-aura/templates/config.hbs",
-      width: 680,
-      height: "auto",
-      closeOnSubmit: true,
-      submitOnChange: false,
-      resizable: true
-    });
-  }
+class OrelDeathAuraConfig extends HandlebarsApplicationMixin(ApplicationV2) {
+  static DEFAULT_OPTIONS = {
+    id: "orel-death-aura-config",
+    tag: "form",
+    window: { title: "Orel Death Aura — Configure", resizable: true },
+    position: { width: 680, height: "auto" },
+    form: { handler: this.#onSubmitSettings, closeOnSubmit: true, submitOnChange: false }
+  };
 
-  async getData() {
+  static PARTS = {
+    config: { template: "modules/orel-death-aura/templates/config.hbs" }
+  };
+
+  async _prepareContext(options) {
+    const context = await super._prepareContext(options);
     const wizardRef = game.settings.get("orel-death-aura", SETTINGS.wizardActor) ?? "";
     const usageRef = game.settings.get("orel-death-aura", SETTINGS.usageFeature) ?? "";
 
     const actors = game.actors.contents
       .filter(a => a.type === "character")
-      .map(a => ({ id: a.id, name: a.name }))
+      .map(a => ({ id: a.id, name: a.name, selected: a.id === wizardRef }))
       .sort((a, b) => a.name.localeCompare(b.name));
 
     const wizardActor = game.actors.get(wizardRef) ?? null;
@@ -508,19 +556,19 @@ class OrelDeathAuraConfig extends FormApplication {
     const features = wizardActor
       ? wizardActor.items
           .filter(i => {
-            const max = Number(foundry.utils.getProperty(i, "system.uses.max") ?? 0);
-            if (max <= 0) return false;
+            if (!getItemUses(i).hasUses) return false;
             const t = (i.type ?? "").toLowerCase();
             return ["feat"].includes(t);
           })
-          .map(i => ({
-            id: i.id,
-            name: `${i.name} (${foundry.utils.getProperty(i, "system.uses.value") ?? 0}/${foundry.utils.getProperty(i, "system.uses.max") ?? 0})`
-          }))
+          .map(i => {
+            const uses = getItemUses(i);
+            return { id: i.id, name: `${i.name} (${uses.value}/${uses.max})`, selected: i.id === usageRef };
+          })
           .sort((a, b) => a.name.localeCompare(b.name))
       : [];
 
     return {
+      ...context,
       wizardRef,
       usageRef,
       actors,
@@ -534,39 +582,32 @@ class OrelDeathAuraConfig extends FormApplication {
     };
   }
 
-  activateListeners(html) {
-    super.activateListeners(html);
+  async _onRender(context, options) {
+    await super._onRender(context, options);
+    this.element.setAttribute("autocomplete", "off");
 
-    html.find('select[name="radiusPreset"]').on("change", ev => {
-      const key = ev.currentTarget.value;
-      if (!key) return;
-      const preset = PRESETS.radius.find(p => p.key === key);
-      if (preset) html.find('textarea[name="radiusProgression"]').val(JSON.stringify(preset.value));
-      ev.currentTarget.value = "";
-    });
+    for (const [picker, field, presets] of [
+      ["radiusPreset", "radiusProgression", PRESETS.radius],
+      ["healDicePreset", "healDiceProgression", PRESETS.healDice],
+      ["maxRestorePreset", "maxRestoreSlotLevelProgression", PRESETS.maxRestore]
+    ]) {
+      this.element.querySelector(`select[name="${picker}"]`).addEventListener("change", event => {
+        const preset = presets.find(p => p.key === event.currentTarget.value);
+        if (preset) this.element.querySelector(`textarea[name="${field}"]`).value = JSON.stringify(preset.value);
+        event.currentTarget.value = "";
+      });
+    }
 
-    html.find('select[name="healDicePreset"]').on("change", ev => {
-      const key = ev.currentTarget.value;
-      if (!key) return;
-      const preset = PRESETS.healDice.find(p => p.key === key);
-      if (preset) html.find('textarea[name="healDiceProgression"]').val(JSON.stringify(preset.value));
-      ev.currentTarget.value = "";
-    });
-
-    html.find('select[name="maxRestorePreset"]').on("change", ev => {
-      const key = ev.currentTarget.value;
-      if (!key) return;
-      const preset = PRESETS.maxRestore.find(p => p.key === key);
-      if (preset) html.find('textarea[name="maxRestoreSlotLevelProgression"]').val(JSON.stringify(preset.value));
-      ev.currentTarget.value = "";
-    });
-
-    html.find('select[name="wizardActor"]').on("change", () => {
+    this.element.querySelector('select[name="wizardActor"]').addEventListener("change", () => {
       ui.notifications.info("Сохрани настройки и открой конфиг заново, чтобы обновить список особенностей.");
     });
   }
 
-  async _updateObject(event, formData) {
+  static async #onSubmitSettings(event, form, formData) {
+    await this._saveSettings(formData.object);
+  }
+
+  async _saveSettings(formData) {
     await game.settings.set("orel-death-aura", SETTINGS.wizardActor, String(formData.wizardActor ?? ""));
     await game.settings.set("orel-death-aura", SETTINGS.usageFeature, String(formData.usageFeature ?? ""));
     await game.settings.set("orel-death-aura", SETTINGS.radiusProgression, String(formData.radiusProgression ?? ""));
@@ -579,8 +620,6 @@ class OrelDeathAuraConfig extends FormApplication {
 // ------------------ Init & Ready ------------------
 
 Hooks.once("init", () => {
-  if (!Handlebars.helpers.eq) Handlebars.registerHelper("eq", (a, b) => a === b);
-
   game.settings.register("orel-death-aura", SETTINGS.wizardActor, {
     name: "Wizard Actor",
     scope: "world",
@@ -631,6 +670,18 @@ Hooks.once("init", () => {
   });
 });
 
+function registerSocketHandlers() {
+  if (OREL_SOCKET || !globalThis.socketlib) return;
+  OREL_SOCKET = socketlib.registerModule(MODULE_ID);
+  if (!OREL_SOCKET) return;
+  OREL_SOCKET.register(SOCKET_FN, orelShowWizardDialog);
+  OREL_SOCKET.register(SOCKET_FN_APPLY_HEAL, gmApplyHeal);
+  OREL_SOCKET.register(SOCKET_FN_RESTORE_SLOT, gmRestoreSlot);
+  log("socket handlers registered", { module: MODULE_ID });
+}
+
+Hooks.once("socketlib.ready", registerSocketHandlers);
+
 Hooks.once("ready", async () => {
   log("ready: start");
 
@@ -640,17 +691,20 @@ Hooks.once("ready", async () => {
     return;
   }
 
-  // Register socket handlers on ALL clients
-  OREL_SOCKET = socketlib.registerSystem(game.system.id);
-  OREL_SOCKET.register(SOCKET_FN, orelShowWizardDialog);
-  OREL_SOCKET.register(SOCKET_FN_APPLY_HEAL, gmApplyHeal);
-  OREL_SOCKET.register(SOCKET_FN_CONSUME_USE, gmConsumeUse);
+  // Also register here if SocketLib's init hook ran before this module loaded.
+  registerSocketHandlers();
+  if (!OREL_SOCKET) {
+    ui.notifications.error("Orel: не удалось зарегистрировать SocketLib. Перезапусти игровой мир.");
+    return;
+  }
 
-  log("ready: socket handlers registered", {
-    system: game.system.id,
-    SOCKET_FN,
-    SOCKET_FN_APPLY_HEAL,
-    SOCKET_FN_CONSUME_USE
+  // preUpdateActor only runs on the requesting client. Pass the old HP through
+  // operation options so the GM can detect committed updates from any player.
+  Hooks.on("preUpdateActor", (actor, changes, options) => {
+    const newHp = foundry.utils.getProperty(changes, "system.attributes.hp.value");
+    if (newHp !== undefined && newHp !== null) {
+      options.orelDeathAuraPreviousHp = Number(actor.system.attributes.hp.value ?? 0);
+    }
   });
 
   // GM-only death detector
@@ -669,14 +723,15 @@ Hooks.once("ready", async () => {
     return (now - prev) > DEATH_DEDUP_MS;
   }
 
-  Hooks.on("preUpdateActor", async (deadActor, changes) => {
+  Hooks.on("updateActor", async (deadActor, changes, options) => {
     try {
+      if (!game.user.isActiveGM) return;
       const newHp = foundry.utils.getProperty(changes, "system.attributes.hp.value");
       if (newHp === undefined || newHp === null) return;
 
-      const oldHp = deadActor.system.attributes.hp.value ?? 0;
+      const oldHp = options.orelDeathAuraPreviousHp;
       if (!(oldHp > 0 && Number(newHp) <= 0)) return;
-      if (!shouldProcessDeath(deadActor.id)) return;
+      if (!shouldProcessDeath(deadActor.uuid)) return;
 
       log("GM detector: death transition", { dead: deadActor.name, oldHp, newHp });
 
@@ -704,10 +759,10 @@ Hooks.once("ready", async () => {
       }
 
       const payload = { wizardActorId: wizardActor.id, deadName: deadActor.name, dist };
-      for (const oid of ownerIds) {
+      await Promise.allSettled(ownerIds.map(async oid => {
         log("GM detector: send socket to owner", { oid, payload });
         await OREL_SOCKET.executeAsUser(SOCKET_FN, oid, payload);
-      }
+      }));
     } catch (e) {
       warn("GM detector error", e);
     }
